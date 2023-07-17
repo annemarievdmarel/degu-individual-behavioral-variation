@@ -1,0 +1,9 @@
+cff-version: 1.1.0
+message: "If you use the code and data, please cite it as below."
+authors:
+  - family-names: van der Marel
+    given-names: Annemarie
+    orcid: https://orcid.org/0000-0003-3942-8314
+title: annemarievdmarel/degu-individual-behavioral-variation: Individual behavioral variation, social organization and reproductive success in degus
+version: v1.0
+date-released: 2023-07-17
