@@ -54,9 +54,32 @@ parentage <- read.csv("./data/parentage.csv")
 
 genotyping <- read.csv("data/genotyping.csv")
 
+trapping <- read.csv("data/trapping.csv") %>%
+  janitor::clean_names() 
 ```
 
 # check data
+
+
+### trap data
+
+```{r}
+degus <- groupdata %>%
+  dplyr::select(ID) 
+
+trap <- trapping %>% 
+  dplyr::rename(ID=ear_tag_id) %>%
+  filter( ID %in% degus$ID) %>% # only select adults used for group membership
+  group_by(ID) %>%
+  tally() 
+
+trapsum <- trap %>%
+ summarize(mean=mean(n), 
+           SD=sd(n))
+
+```
+
+
 
 
 remove individuals only tested once 
@@ -109,7 +132,9 @@ ofdata$sex[ofdata$id==193]<-"M"
   #        age=if_else(age=="Adult", 1, 0)) # adults = 1, pups = 0
 # ofdata$age<- as.integer(ofdata$age)
 # ofdata$sex <- as.integer(ofdata$sex)
-
+of_sum <- ofdata %>%
+  group_by(date) %>%
+  tally()
 
 of_sum <- ofdata %>%
   group_by(id) %>%
@@ -175,6 +200,9 @@ pgroup <- pokedata %>%
 # group column =  the burrow cluster they were trapped at, not social group
 rm(ogroup)
 
+poke_sum <- pokedata %>%
+  group_by(date) %>%
+  tally()  
 
 poke_sum <- pokedata %>%
   group_by(id, sex) %>%
@@ -262,7 +290,7 @@ plotpoke
 Remove ID 236 (only id in social group 4) from personality tests
 check mom 173 group11
 ```{r}
-
+n_distinct(group$id)
 n_distinct(group$groupID)
 
 check_mom <- group %>%
