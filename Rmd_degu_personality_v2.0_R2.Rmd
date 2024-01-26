@@ -1,0 +1,2147 @@
+---
+title: "degu_personality_2017"
+author: "Annemarie van der Marel"
+date: "2023-03-03"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+Personality tests
+    • Open field test 
+        ◦ Latency to emerge from hide: boldness (latency_hide)
+        ◦ Proportion of time spent moving: activity instead of exploration (time_in_arena/7*60s)
+        ◦ Total distance the focal traveled in the novel environment (distance_moved): 
+        exploration
+
+        
+    • Poke test
+        ◦ Turning and charging at eraser end of pencil that was touching hindquarters (yes = 
+        bold)  
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo=FALSE, include=FALSE, message=FALSE, warning=FALSE)
+
+  if (!require("pacman")) install.packages("pacman")
+pacman::p_load(permute, MASS,  ggplot2, rptR, lme4, effects, assortnet, asnipe, brms, parallel, coda, rethinking, MuMIn, tidyverse,  arm, ggpubr, plyr, MuMIn, knitr, broom, gridExtra, MCMCglmm, performance)
+
+
+#library(tidybayes);library(parallel) #library(broom.mixed);library(merTools);
+
+```
+
+Stan settings
+```{r}
+mycores <- parallel::detectCores() - 2
+
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+```
+
+# import data
+
+```{r}
+openfielddata <- read.csv("./data/open_field_test.csv")
+
+pokedata <- read.csv("./data/poke_test.csv") 
+
+groupdata <- read.csv("./data/socialgroups2017.csv")
+
+parentage <- read.csv("./data/parentage.csv")
+
+genotyping <- read.csv("data/genotyping.csv")
+
+trapping <- read.csv("data/trapping.csv") %>%
+  janitor::clean_names() 
+```
+
+# check data
+
+
+### trap data
+
+```{r}
+degus <- groupdata %>%
+  dplyr::select(ID) 
+
+trap <- trapping %>% 
+  dplyr::rename(ID=ear_tag_id) %>%
+  filter( ID %in% degus$ID) %>% # only select adults used for group membership
+  group_by(ID) %>%
+  tally() 
+
+trapsum <- trap %>%
+ summarize(mean=mean(n), 
+           SD=sd(n))
+
+```
+
+
+
+
+remove individuals only tested once 
+
+### open field test
+from openfield data:
+  - exclude sex == "H" -> not hembra but hermaphrodite or very masculinized female...
+  - exclude video "C" and "P"
+
+```{r check openfield data}
+
+# check social group
+ogroup <- openfielddata %>%
+  dplyr::select(ID, group) %>%
+  left_join(groupdata) %>%
+  mutate(check=if_else(group==groupID, "ok", "check"))
+# group column = the social group and not the burrow cluster they were trapped at
+rm(ogroup)
+
+# chekc dataframe
+n_distinct(openfielddata$ID)
+
+unique(openfielddata$video)
+unique(openfielddata$sex)
+unique(openfielddata$age)
+
+hermaphroditeID <- openfielddata %>%
+  filter(sex=="H") %>%
+  dplyr::select(ID) %>%
+  slice(1) # ID 193 = male as he fathered offspring
+
+ofdata <- openfielddata %>%
+  dplyr::rename(id=ID, 
+                order=trial) %>%
+  filter(!is.na(distance_moved), # remove empty cells
+         !video %in% c("C", "P"), # remove C and P trials, which were predator exclusion ids
+         age=="Adult") # remove pups
+
+
+unique(ofdata$video)
+unique(ofdata$age)
+unique(ofdata$sex)
+#ofdata$sex[ofdata$sex=="H"]<-"F" # H stands for hermaphrodite, not hembra = female, macho = male
+
+
+ofdata$sex[ofdata$id==193]<-"M"
+
+  # %>%
+  # mutate(sex=if_else(sex=="F", 2, 1), # females = 2 and males = 1
+  #        age=if_else(age=="Adult", 1, 0)) # adults = 1, pups = 0
+# ofdata$age<- as.integer(ofdata$age)
+# ofdata$sex <- as.integer(ofdata$sex)
+of_sum <- ofdata %>%
+  group_by(date) %>%
+  tally()
+
+of_sum <- ofdata %>%
+  group_by(id) %>%
+  tally()
+# remove individuals only measured once
+onemeasure <- of_sum %>%
+  filter(n==1)
+ids.1.measure <- onemeasure$id
+
+#glimpse(ofdata)
+
+of <- ofdata %>%
+  filter(!id %in% ids.1.measure)
+n_distinct(of$id)
+length(of$id)
+of$video<-as.integer(of$video)
+
+# period of when trials were performed
+range(of$date)
+unique(sort(of$date))
+length(unique(of$date))
+
+of_sum <- of %>%
+  group_by(id) %>%
+  slice_head() %>%
+  group_by( sex) %>% #, age
+  tally()
+
+ofrepeat <- of %>%
+  group_by(id) %>%
+  tally() %>%
+  summarise(mean=mean(n),
+            sd=sd(n), 
+            min=min(n), 
+            max=max(n))
+
+
+# id's from how many social groups
+n_distinct(of$group)
+
+ofgroup <- of %>%
+  group_by(id) %>%
+  slice_head() %>%
+  group_by(group) %>% 
+  tally() 
+```
+167 individuals from 18 social groups for which we did open field test more than once: 46 adult females, 20 adult males, 54 juvenile females and 47 juvenile males where we had more than 1 open field test per individual (mean +- sd = 3.20 +- 0.75). 
+
+Excluding pups:
+We obtained more than one behavioral measure from the open field test for 67 adult degus, 46 females and 21 males. On average we obtained 3.67 +- 0.88 (SD) measures per individual. 
+
+## poke test
+
+```{r check poke test}
+glimpse(pokedata)
+
+# check social group
+pgroup <- pokedata %>%
+  dplyr::select(id, burrow) %>% 
+  dplyr::rename(ID=id) %>%
+  left_join(groupdata) %>%
+  mutate(check=if_else(burrow==groupID, "ok", "check"))
+# group column =  the burrow cluster they were trapped at, not social group
+rm(ogroup)
+
+poke_sum <- pokedata %>%
+  group_by(date) %>%
+  tally()  
+
+poke_sum <- pokedata %>%
+  group_by(id, sex) %>%
+  tally()  # only id 146 tested once
+
+n_distinct(pokedata$id)
+
+poke_sum <- pokedata %>%
+  filter(id!=146) %>%
+  group_by(id) %>%
+  slice_head() %>%
+  group_by( sex) %>% 
+  tally()
+  
+
+pokerepeat <- pokedata %>%
+  group_by(id) %>%
+  tally() %>%
+  filter(n!=1) %>%
+  summarise(mean=mean(n),
+            sd=sd(n),
+             min=min(n), 
+            max=max(n))
+
+group<- groupdata %>% 
+  dplyr::rename(id=ID)
+
+poke <- pokedata %>%
+  filter(id!=146) %>% # id only measured once
+   mutate(sex_num=if_else(sex=="F", 2, 1)) %>% #create binomial variables for sex: females = 0 (worse model)/2 and males = 1
+  dplyr::rename(trial=obs, 
+                date_poke=date) %>%
+  dplyr::select(date_poke, trial, id,poke, sex_num) %>%
+  left_join(group)
+
+
+
+# id's from how many social groups
+n_distinct(poke$groupID)
+
+pokegroup <- poke %>%
+  group_by(id) %>%
+  slice_head() %>%
+  group_by(groupID) %>% 
+  tally()  
+pokegroup <-   poke %>%
+  group_by(groupID) %>%
+  tally()
+
+
+
+```
+62 individuals from 18 social groups for which we have poke data: 44 adult females and 18 adult males where we had more than 1 poke test result (mean +- sd = 12.76 +- 5.41). 
+
+
+## group composition
+Remove ID 236 (only id in social group 4) from personality tests
+check mom 173 group11
+```{r}
+n_distinct(group$id)
+n_distinct(group$groupID)
+
+check_mom <- group %>%
+  filter(id==173)
+
+groupsum <- group %>%
+  dplyr::group_by(groupID) %>%
+  dplyr::summarise(groupsize=n_distinct(id)) %>%
+  summarise(mean=mean(groupsize),
+            sd=sd(groupsize))
+
+groupsex <- group %>%
+  dplyr::group_by(groupID, sex) %>%
+  tally() %>%
+  dplyr::group_by(sex) %>%
+  dplyr::summarise(
+                   mean=mean(n),
+                   sd=sd(n)) 
+
+```
+19 social groups with on average 3.95 +- 1.81 (SD, range [1 - 9]) adults in the group with 2.89 +- 1.57 females and 1.28 +- 0.57 males. 
+
+## parentage
+
+```{r}
+glimpse(genotyping)
+
+totaloffspring <- n_distinct(genotyping$Offspring.ID)
+totalfemales <- n_distinct(genotyping$Candidate.mother.ID)
+totalmales <- n_distinct(genotyping$Candidate.father.ID)
+totalgenotyped <- totaloffspring+totalfemales+totalmales
+
+```
+
+
+Do not include litter mass as not all pups are measured the same day after emergence from the natal burrow. 
+
+```{r}
+glimpse(parentage)
+
+check_pup269<- parentage %>%
+  dplyr::rename(offspringID=OffspringID) %>%
+  filter(offspringID==269)
+check_mom<- parentage %>%
+  dplyr::rename(offspringID=OffspringID) %>%
+  filter(motherID==173)  # mother groupID should be 11
+
+parentage$mother_groupID[parentage$OffspringID==269]<-11
+
+check_herma <- parentage %>%
+  filter(motherID==193| fatherID==193)  # ID 193 is male 
+
+totaloffspring <- n_distinct(parentage$OffspringID)
+totalmothers <- n_distinct(parentage$motherID)
+totalfathers <- n_distinct(parentage$fatherID)
+totalgenotyped <- totaloffspring+totalmothers+totalfathers
+
+mothers <- parentage %>%
+  dplyr::group_by(motherID) %>%
+  dplyr::summarize(n_mates= n_distinct(fatherID),
+                   n_offspring=length(OffspringID), 
+                   littermass = sum(first_weight_offspring)) %>%
+  dplyr::mutate(sex="F") %>%
+  dplyr::rename(id=motherID)
+
+mean(mothers$n_mates)
+sd(mothers$n_mates)
+
+fathers <- parentage %>%
+  dplyr::group_by(fatherID) %>%
+  dplyr::summarize(n_mates= n_distinct(motherID),
+                   n_offspring=length(OffspringID), 
+                   littermass = sum(first_weight_offspring)) %>%
+  dplyr::mutate(sex="M") %>%
+  dplyr::rename(id=fatherID)
+
+mean(fathers$n_mates)
+sd(fathers$n_mates)
+
+
+# litter size of communal groups
+communalgroups <- mothers %>%
+  left_join(group) %>%
+  group_by(groupID) %>%
+  summarize(mean =mean(n_offspring),
+            sd= sd(n_offspring),
+            min=min(n_offspring), 
+            max=max(n_offspring), 
+            n=n_distinct(groupID))
+
+
+littersize <- bind_rows(mothers, fathers)
+littersize <- littersize %>%
+  mutate(rel_fitness = n_offspring/mean(n_offspring, na.rm=TRUE))
+
+mean(littersize$n_offspring)
+
+sum_life <- littersize %>% 
+  group_by(sex) %>%
+  dplyr::summarise(across(c(n_offspring, littermass), 
+                   list(mean=mean, sd=sd, min=min, max=max), na.rm=TRUE))
+
+```
+
+Males had more pups (9.19 +- 5.87 (mean+-SD) [1-22]) and heavier litters (365.94 +- 250.29 [32.9 - 1055.2]) than females (litter size of 4.51 +- 2.06 [1-10] pups with a litter mass of 179.52 +- 83.38 [38.0 - 391.2]. 
+
+
+
+
+# Summarize open field test
+Latency to emerge: boldness
+Distance moved: exploration
+Proportion of time spent moving: activity instead of exploration
+the proportion of the novel environment explored (number of grids explored divided by the total amount of grids): exploration
+
+
+(create binomial variables for sex and age)
+
+```{r summary table}
+glimpse(of)
+unique(of$age)
+
+# exploration = distance_moved
+# activity = proportion of time spent moving
+# boldness = latency to emerge from hide
+
+of_all <- of %>% 
+  mutate(activity=time_moving_s/time_in_arena,
+         sex_num=if_else(sex=="F", 2, 1)) %>% #create binomial variables for sex: females = 2 and males = 1
+    dplyr::select(date, group, id, sex, sex_num, video, distance_moved, activity, 
+                  latency_hide) %>%
+  mutate(sex_cent=scale(sex_num, scale = F),
+         video_cent=scale(video, scale = F))
+  
+
+#of_all$video <- as.factor(of_all$video)
+
+range(of_all$distance_moved)
+range(of_all$activity) 
+range(of_all$latency_hide)
+
+# ofsum <- of_all %>%
+#   dplyr::summarise(across(c(distance_moved, activity, latency_hide), 
+#                    list(mean=mean, sd=sd, min=min, max=max), na.rm=TRUE))
+# 
+# write.csv()
+
+
+activity_sum <- of_all %>%
+  #dplyr::group_by(as.factor(sex)) %>% #, as.factor(age)
+  dplyr::summarise(
+            mean=mean(activity),
+            sd=sd(activity), 
+            n=length(activity),
+            se=sd/sqrt(n), 
+            min=min(activity),
+            max=max(activity),
+            n_id=n_distinct(id)) 
+
+bold_sum <- of_all %>%
+  #dplyr::group_by(as.factor(sex)) %>% 
+  dplyr::summarise(
+            mean=mean(latency_hide),
+            sd=sd(latency_hide), 
+            n=length(latency_hide),
+            se=sd/sqrt(n), 
+            min=min(latency_hide),
+            max=max(latency_hide), # how many did not enter the arena? none, all emerged into the arena
+            n_id=n_distinct(id)) 
+
+
+
+
+explore_sum <- of_all %>%
+  #dplyr::group_by(as.factor(sex)) %>% 
+  dplyr::summarise(
+            mean=mean(distance_moved),
+            sd=sd(distance_moved), 
+            n=length(distance_moved),
+            se=sd/sqrt(n), 
+            min=min(distance_moved),
+            max=max(distance_moved),
+             n_id=n_distinct(id)) 
+
+explore_sum.sex <- of_all %>%
+  dplyr::group_by(as.factor(sex)) %>% 
+  dplyr::summarise(
+            mean=mean(distance_moved),
+            sd=sd(distance_moved), 
+            n=length(distance_moved),
+            se=sd/sqrt(n), 
+            min=min(distance_moved),
+            max=max(distance_moved),
+             n_id=n_distinct(id)) 
+
+```
+
+average proportion of time moving is 0.49 +- 0.13s (mean +- SD). 
+
+## table
+**Table 1**. Descriptive statistics of our personality measures obtained in an open field test in a natural population of degus.   
+```{r}
+
+table1 <- data.frame(
+  Personality = c("Activity", "",
+            "Boldness",
+            "Exploration"),
+            #"Willingness to attack"),
+  'Measured as' = c("proportion of time spent moving", 
+                    "latency to emerge from hide (s)",
+                    "distance moved (cm)" ), #,
+                    #"response to being prodded (yes/no)" ),
+  Mean = c(round(mean(of_all$activity),2),
+           round(mean(of_all$latency_hide),2),
+           round(mean(of_all$distance_moved),2)
+           #round(mean(poke$poke),2)
+           ),
+  SD = c(round(sd(of_all$activity),2),
+           round(sd(of_all$latency_hide),2),
+           round(sd(of_all$distance_moved),2)
+           #round(sd(poke$poke),2)
+           ),
+  Min = c(round(min(of_all$activity),2),
+           round(min(of_all$latency_hide),2),
+           round(min(of_all$distance_moved),2)
+           ),
+  Max = c(round(max(of_all$activity),2),
+           round(max(of_all$latency_hide),2),
+           round(max(of_all$distance_moved),2)
+           ),
+  n = c(round(length(of_all$activity),2),
+           round(length(of_all$latency_hide),2),
+           round(length(of_all$distance_moved),2)
+           #round(length(poke$poke),2)
+           )
+)
+kable(table1)
+
+#write.csv(table1, "./table_openfieldtest_summary.csv")
+
+```
+
+BY sex
+**Table 1**. Descriptive statistics of our personality measures for adult males and females obtained in an open field test in a natural population of degus.   
+```{r}
+
+table1 <- data.frame(
+  Personality = c("Activity", "",
+            "Boldness", "",
+            "Exploration", ""),
+            #"Willingness to attack"),
+  'Measured as' = c("proportion of time spent moving", "",
+                    "latency to emerge from hide (s)","",
+                    "distance moved (cm)", "" ), #,
+                    #"response to being prodded (yes/no)" ),
+  Sex = c("female", "male", 
+          "female", "male", 
+          "female", "male"),
+  Mean = c(round(mean(of_all$activity[of_all$sex=="F"]),2),
+           round(mean(of_all$activity[of_all$sex=="M"]),2),
+           round(mean(of_all$latency_hide[of_all$sex=="F"]),2),
+           round(mean(of_all$latency_hide[of_all$sex=="M"]),2),
+           round(mean(of_all$distance_moved[of_all$sex=="F"]),2),
+           round(mean(of_all$distance_moved[of_all$sex=="M"]),2)
+           #round(mean(poke$poke),2)
+           ),
+  SD = c(round(sd(of_all$activity[of_all$sex=="F"]),2),
+         round(sd(of_all$activity[of_all$sex=="M"]),2),
+         round(sd(of_all$latency_hide[of_all$sex=="F"]),2),
+         round(sd(of_all$latency_hide[of_all$sex=="M"]),2),
+           round(sd(of_all$distance_moved[of_all$sex=="F"]),2),
+         round(sd(of_all$distance_moved[of_all$sex=="M"]),2)
+           #round(sd(poke$poke),2)
+           ),
+  Min = c(round(min(of_all$activity[of_all$sex=="F"]),2),
+          round(min(of_all$activity[of_all$sex=="M"]),2),
+           round(min(of_all$latency_hide[of_all$sex=="F"]),2),
+          round(min(of_all$latency_hide[of_all$sex=="M"]),2),
+           round(min(of_all$distance_moved[of_all$sex=="F"]),2),
+          round(min(of_all$distance_moved[of_all$sex=="M"]),2)
+           ),
+  Max = c(round(max(of_all$activity[of_all$sex=="F"]),2),
+          round(max(of_all$activity[of_all$sex=="M"]),2),
+           round(max(of_all$latency_hide[of_all$sex=="F"]),2),
+          round(max(of_all$latency_hide[of_all$sex=="M"]),2),
+           round(max(of_all$distance_moved[of_all$sex=="F"]),2),
+          round(max(of_all$distance_moved[of_all$sex=="M"]),2)
+           )
+  # ,
+  # n = c(round(length(of_all$activity[of_all$sex=="F"]),2),
+  #       round(length(of_all$activity[of_all$sex=="M"]),2),
+  #          round(length(of_all$latency_hide[of_all$sex=="F"]),2),
+  #       round(length(of_all$latency_hide[of_all$sex=="M"]),2),
+  #          round(length(of_all$distance_moved[of_all$sex=="F"]),2),
+  #       round(length(of_all$distance_moved[of_all$sex=="M"]),2)
+  #          #round(length(poke$poke),2)
+           )
+
+kable(table1)
+
+#write.csv(table1, "./table_openfieldtest_summaryXsex.csv")
+
+```
+
+
+# repeatable behaviors
+at first, we check repeatability for the behaviors separately. If they are repeatable, we will incorporate the behaviors into a multivariate model. We would have to ascertain that all the response variables are close to a normal distribution, so transform if necessary and scale all the variables. 
+
+Scale function -> center=T: mean-centering and scale=T: scaling on 1 SD
+scale(x, center = TRUE, scale = TRUE)
+                 
+## Latency to emerge
+Latency to emerge: boldness
+
+
+### distribution
+https://cran.r-project.org/web/packages/brms/vignettes/brms_families.html 
+Response time model? -> exgaussian/shifted_lognormal/wiener families
+
+```{r}
+
+# normally distributed?
+
+ggplot(of_all, aes(x=sex, y=latency_hide)) +  # filter(dsize1, id!="BBB")
+  geom_boxplot(aes(color=group)) + 
+  theme_classic()
+
+ggplot(of, aes(x=id, y=latency_hide, color=sex)) +
+  geom_point() +
+  #geom_boxplot() +
+  theme_classic()
+
+ggplot(of, aes(x=video, y=latency_hide, color=id)) +
+  geom_point() +
+  #geom_boxplot() +
+  theme_classic()
+
+
+ggplot(of_all, aes(x=latency_hide)) +
+  geom_histogram()  # very right skewed
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(of_all, "latency_hide")
+shapiro.test(of_all$latency_hide)
+
+
+m <- lm(latency_hide ~ sex, data = of_all)
+summary(m)
+d <- data.frame(residuals = residuals(m),         # Residuals
+                std_residuals = rstudent(m), # Studentized Residuals
+                fitted = fitted(m),          # Fitted values
+                cooks = cooks.distance(m))   # Cook's D
+d <- mutate(d, observation = 1:nrow(d))           # Observation number
+
+# histogram of residuals
+ggplot(data = d, aes(x = std_residuals)) +
+  geom_histogram(bins = 10)
+
+# Check for Normality: QQ Normality plot of residuals
+ggplot(data = d, aes(sample = std_residuals)) +
+  stat_qq() +
+  stat_qq_line()
+
+# Check heteroscedasticity or constant variance
+ggplot(d, aes(x = fitted, y = std_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+
+# Cook's D
+ggplot(d, aes(x = observation, y = cooks)) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 4/nrow(d), linetype = "dashed")
+# outliers
+d_outliers <- filter(d, cooks > 4/nrow(d))  # observation 86
+#d_outliers # no outliers when log-transformed; 2,31,33,34
+
+
+# distribution
+fitdistrplus::plotdist(of_all$latency_hide)
+fitdistrplus::descdist(of_all$latency_hide, discrete = F) # beta distribution
+
+# (gamlss)
+fit <- gamlss::fitDist(of$latency_hide, k = 2, type = "realline", 
+               trace = FALSE, try.gamlss = TRUE)
+summary(fit)
+fit$fits  # best fit: c("SEP2", "Skew Exponential Power type 2") 
+fit$failed
+
+```
+
+inverse transformed (1/latency) -> to create boldness scores, where longer latency to emerge times correspond to shy individuals, so the boldness score would correspond as larger numbers = bolder responses. Add 0.0001 to 0s latency to emerge from hide 
+
+then ln-transformed to meet assumptions of normality --> not quite so instead try square root transformation. 
+
+```{r}
+boldness <- of_all %>%
+  mutate(latency_log= 1+latency_hide,
+         boldness_score = 1/latency_log, 
+         log_bold=log(boldness_score))
+        # scale_bold=scale(log_bold))
+
+ggplot(of_all, aes(x=log_bold)) +
+  geom_histogram()  #  still right skewed
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(boldness, "log_bold")
+shapiro.test(boldness$log_bold)
+
+
+```
+
+
+
+```{r}
+boldness <- of_all %>%
+  mutate(latency1= 1+latency_hide,
+         boldness_score = 1/latency1, 
+         boldness=sqrt(boldness_score))
+        # scale_bold=scale(log_bold))
+
+ggplot(boldness, aes(x=sqrt(latency_hide))) +
+  geom_histogram()  #  still right skewed
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(boldness, "boldness")
+shapiro.test(boldness$boldness)
+
+
+```
+
+square root transformation -> closest to normal distribution
+large values are shy individuals (took a longer time to emerge from hide)
+```{r}
+# square root transformation
+of_all$boldness <- sqrt(of_all$latency_hide)  # large values are shy individuals (took a longer time to emerge from hide)
+
+ggqqplot(of_all, "boldness")
+shapiro.test(of_all$boldness)
+
+```
+
+### bayesian model
+
+```{r boldness model}
+
+# square root transformation
+of_all$boldness <- sqrt(of_all$latency_hide) 
+
+
+
+# get prior
+prior_bold <- get_prior(boldness ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) + 
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian())
+
+
+m_bold <- brm(boldness ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian(), #Beta()
+              prior = prior_bold,
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345)
+
+# sex as factor
+prior_bolds <- get_prior(boldness ~ as.factor(sex) + scale(video, scale=FALSE) + 
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian())
+m_bolds <- brm(boldness ~ as.factor(sex) + scale(video, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian(), #Beta()
+              prior = prior_bolds,
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345)
+
+
+summary(m_bold, waic = TRUE)
+#head(predict(global)) # predict responses based on the fitted model
+
+# investigate model fit
+pp_check(m_bold) 
+plot(m_bold, ask=FALSE)
+plot(conditional_effects(m_bold),points=T, ask = F)
+
+brms::loo(m_bold) #, moment_match = TRUE
+loo.bold <- brms::loo(m_bold)$estimate[3]
+loo.bolds <- brms::loo(m_bolds)$estimate[3]
+
+```
+The marginal R2 considers only the variance of the fixed effects, while the conditional R2 takes both the fixed and random effects into account. 
+
+estimates of conditional and marginal R2 values as these can help readers interpret the relative importance of the fixed effects and random effects in explaining the behavioral variation. A repeatability of 0.41 might seem modest, but if the marginal R2 (variance explained by fixed effects) is 0.90, then that means that the individual ID only explains 41% of the remaining 10%.
+
+```{r}
+
+performance::r2_bayes(m_bold)
+
+```
+
+
+### repeatability
+
+```{r boldness repeatability}
+#colnames(posterior_samples(m_explore))
+
+colnames(as_draws_df(m_bold))
+
+# within individuals
+var.id <- as_draws_df(m_bold)$"sd_id__Intercept"^2
+round(mean(var.id),3);round(HPDinterval(as.mcmc(var.id),0.95),3)
+
+var.group <- as_draws_df(m_bold)$"sd_group__Intercept"^2
+round(mean(var.group),3);round(HPDinterval(as.mcmc(var.group),0.95),3)
+
+var.res <- as_draws_df(m_bold)$"sigma"^2
+round(mean(var.res),3);round(HPDinterval(as.mcmc(var.res),0.95),3)
+
+
+RDist.bold <- var.id / (var.id + var.group + var.res) # repeatability
+mean(RDist.bold);HPDinterval(as.mcmc(RDist.bold),0.95)
+round(HPDI(RDist.bold, prob=0.95),2)
+
+#Coefficient of variation for between individual variance (CVi) 
+CVi <- sqrt(var.id) / mean(of_all$boldness)
+mean(CVi);HPDinterval(as.mcmc(CVi),0.95)
+round(HPDI(CVi, prob=0.95),2)
+
+# within groups
+RDist.group.bold<- var.group / (var.id + var.group + var.res) # repeatability
+
+mean(RDist.group.bold);HPDinterval(as.mcmc(RDist.group.bold),0.95)
+round(HPDI(RDist.group.bold, prob=0.95),2)
+
+CVg <- sqrt(var.group) / mean(of_all$boldness)
+mean(CVg);HPDinterval(as.mcmc(CVg),0.95)
+round(HPDI(CVg, prob=0.95),2)
+```
+After controlling for the fixed effects of sex and trial number, 16.7% 95CI[0.02-0.30] of the remaining variance can be explained by individual differences in boldness within degus and 3% 95CI[0.00-0.09] within social groups. The coefficient of variation among individuals is 0.23 [0.11-0.35] and among groups is 0.08 [0.00-0.18]. 
+
+
+Check with repeatable package
+```{r rpt boldness}
+
+
+bold.rpt<-rpt(boldness ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                (1|group) + (1|id), 
+              data=of_all, grname=c("group", "id", "Fixed", "Residual"),
+              datatype="Gaussian", link="logit", ratio=T, adjusted=F, nboot=1000, npermut = 1000)
+
+bold.rpt
+
+bold.rpt.count<-rpt(latency_hide ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                (1|group) + (1|id), 
+              data=of_all, grname=c("group", "id", "Fixed", "Residual"),
+              datatype="Poisson", link="sqrt", ratio=T, adjusted=F, nboot=1000, npermut = 1000)
+
+bold.rpt.sex<-rpt(boldness ~ as.factor(sex) + scale(video, scale=FALSE) +
+                (1|group) + (1|id), 
+              data=of_all, grname=c("group", "id", "Fixed", "Residual"),
+              datatype="Gaussian", link="logit", ratio=T, adjusted=F, nboot=1000, npermut = 1000)
+
+bold.rpt.sex
+
+```
+No repeatability for boldness per individual or group. 
+
+### plot
+```{r}
+#levels(as.factor(of_all$age))
+
+n_distinct(m_bold$data$id)
+
+#posterior_explore <- as_draws_df(m_bold 
+colnames(as_draws_df(m_bold))
+posterior_bold <- as_draws_df(m_bold)[,25:91] %>% # including pups: [,33:216]
+  gather(id, value, 
+       "r_id[101,Intercept]" : "r_id[193,Intercept]") %>% # including juveniles: "r_id[101,Intercept]" : "r_id[490,Intercept]") 
+  separate(id, 
+           c(NA,NA,"id",NA), 
+           sep = "([\\_\\[\\,])", fill = "right")
+
+# add sex and age
+of_all$id <- as.character(of_all$id)
+n_distinct(of_all$id)
+
+post_bold <- posterior_bold %>%
+  left_join(dplyr::select(of_all[!duplicated(of_all$id),], id, sex), by ="id") 
+
+post_bold[post_bold$sex == "1",]$value <-
+  post_bold[post_bold$sex == "1",]$value + fixef(m_bold, pars = "Intercept")[1]
+post_bold[post_bold$sex == "2",]$value <-
+  post_bold[post_bold$sex == "2",]$value + fixef(m_bold, pars = "Intercept")[1] + 
+  fixef(m_bold, pars = "sex")[1]
+
+n_distinct(post_bold$id) 
+
+post_bold<- post_bold %>%
+  dplyr::group_by(id) %>%
+  dplyr::mutate(meanbold = mean(value))%>%
+  dplyr::ungroup()# %>%
+  #dplyr::filter(age==1) # show results of only adults
+
+plot_bold <- ggplot()+
+  ggridges::geom_density_ridges(data = post_bold,
+                                aes(x = value, y = reorder(as.factor(id), meanbold),
+                                    height = ..density..,
+                                    fill = sex, 
+                                    scale = 3), alpha = 0.6)+
+  geom_point(data = post_bold[!duplicated(post_bold$id),],
+             aes(x = meanbold, y = as.factor(id)),size = 1)+ # col = as.factor(sex)
+  labs(y = "", x = "latency to emerge (s)" ) +#, fill = "id")+
+  theme_classic() +
+  scale_fill_manual(values =  c("#7CAE00","#FFCC00"))
+                     # c("#F8766D","#C77CFF","#7CAE00","#FFCC00","#00BFC4","gray"))
+plot_bold
+
+```
+
+## Prop time moving
+
+Proportion of time spent moving: activity (time_moving_s/time_in_arena)
+
+### distribution
+```{r}
+ggplot(of_all, aes(x=activity)) +
+  geom_histogram()
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(of_all, "activity")
+shapiro.test(of_all$activity) # normally distributed
+
+
+
+```
+
+### bayesian model
+Inspect a) the effective sample size and b) the Rhat parameter (should be 1) to make sure
+that our model converged. 
+
+“Eff.Sample” close to the expected sample size for all
+parameters. The expected sample size is the number of iterations minus the number of iterations which we discard as warm-up and divided by the thinning interval and multiplied by the number of chains defined in the model (2 chains in our case), i.e. ((3000 - 500) / 2) * 2 = 2500 
+
+
+```{r activity model}
+
+# get prior
+prior_act <- get_prior(activity ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian())
+
+m_activity <- brm(activity ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian(), #Beta()
+              prior=prior_act,
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345)
+
+
+summary(m_activity, waic = TRUE)
+pp_check(m_activity) 
+plot(m_activity, ask=FALSE)
+plot(conditional_effects(m_activity),points=T, ask = F)
+loo.activity <- brms::loo(m_activity)$estimate[3]
+
+# sex as factor
+prior_acts <- get_prior(activity ~ as.factor(sex) + scale(video, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian())
+m_activity_sex <- brm(activity ~ as.factor(sex) + scale(video, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | group),
+              data = of_all,
+              family = gaussian(), #Beta()
+              prior=prior_acts,
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345)
+
+
+summary(m_activity_sex, waic = TRUE)
+pp_check(m_activity_sex) 
+plot(m_activity_sex, ask=FALSE)
+plot(conditional_effects(m_activity_sex),points=T, ask = F)
+loo.activity.sex <- brms::loo(m_activity_sex)$estimate[3]
+
+```
+#### plot
+
+```{r}
+
+activity_trial <- ggplot(of_all, aes(x=as.factor(video), y = activity)) +
+      geom_boxplot()+
+      labs(y = "Proportion of time spent moving", 
+           x = "trial number",
+           title="activity" ) +#, fill = "id")+
+      theme_classic()
+activity_trial
+
+
+
+```
+
+
+
+### repeatability
+```{r}
+#colnames(posterior_samples(m_activity))
+#colnames(as_draws_df(m_activity))
+
+
+
+# within individuals
+var.id <- as_draws_df(m_activity)$"sd_id__Intercept"^2
+round(mean(var.id),3);round(HPDinterval(as.mcmc(var.id),0.95),3)
+
+var.group <- as_draws_df(m_activity)$"sd_group__Intercept"^2
+round(mean(var.group),3);round(HPDinterval(as.mcmc(var.group),0.95),3)
+
+var.res <- as_draws_df(m_activity)$"sigma"^2
+round(mean(var.res),3);round(HPDinterval(as.mcmc(var.res),0.95),3)
+
+RDist <- var.id / (var.id + var.group + var.res) # repeatability
+mean(RDist);HPDinterval(as.mcmc(RDist),0.95)
+round(HPDI(RDist, prob=0.95),2)
+
+#Coefficient of variation for between individual variance (CVi) 
+CVi <- sqrt(var.id) / mean(of_all$activity)
+mean(CVi);HPDinterval(as.mcmc(CVi),0.95)
+
+
+# within groups
+var.id <- as_draws_df(m_activity)$"sd_id__Intercept"^2
+var.group <- as_draws_df(m_activity)$"sd_group__Intercept"^2
+var.res <- as_draws_df(m_activity)$"sigma"^2
+RDist.group <- var.group / (var.id + var.group + var.res) # repeatability
+
+mean(RDist.group);HPDinterval(as.mcmc(RDist.group),0.95)
+#round(HPDI(RDist.group, prob=0.95),2)
+
+CVg <- sqrt(var.group) / mean(of_all$activity)
+mean(CVg);HPDinterval(as.mcmc(CVg),0.95)
+
+```
+After controlling for the fixed effects of sex and trial number, 0.09% 95CI[0.00-0.19] of the remaining variance can be explained by individual differences in activity within degus and 2% 95CI[0.00-0.10] within social groups. The coefficient of variation among individuals is 0.07 [0.01-0.12] and among groups is 0.04 [0.00-0.08]. 
+
+```{r}
+performance::r2_bayes(m_activity)
+```
+
+
+
+Check with repeatable package
+with 1000 bootstraps (to estimate confidence intervals) and permutations (to estimate P-values).
+```{r rpt activity}
+
+
+act.rpt<-rpt(activity ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                (1|group) + (1|id), 
+              data=of_all, grname=c("group", "id", "Fixed", "Residual"),
+              datatype="Gaussian", link="logit", ratio=T, adjusted=F, nboot=1000, npermut = 1000)
+
+act.rpt
+
+```
+id with 9% is not considered repeatable (p=0.35 using permutation method) with rpt package. 
+
+#### plot
+```{r}
+#levels(as.factor(of_all$age))
+
+n_distinct(m_activity$data$id)
+
+#posterior_activity <- as_draws_df(m_activity)
+colnames(as_draws_df(m_activity))
+posterior_act <- as_draws_df(m_activity)[,25:91] %>% # including pups: [,33:216]
+  gather(id, value, 
+       "r_id[101,Intercept]" : "r_id[193,Intercept]") %>% # including juveniles: "r_id[101,Intercept]" : "r_id[490,Intercept]") 
+  separate(id, 
+           c(NA,NA,"id",NA), 
+           sep = "([\\_\\[\\,])", fill = "right")
+
+# add sex and age
+of_all$id <- as.character(of_all$id)
+n_distinct(of_all$id)
+
+post_act <- posterior_act %>%
+  left_join(dplyr::select(of_all[!duplicated(of_all$id),], id, sex), by ="id") 
+
+post_act[post_act$sex == "1",]$value <-
+  post_act[post_act$sex == "1",]$value + fixef(m_activity, pars = "Intercept")[1]
+post_act[post_act$sex == "2",]$value <-
+  post_act[post_act$sex == "2",]$value + fixef(m_activity, pars = "Intercept")[1] + 
+  fixef(m_activity, pars = "sex")[1]
+
+post_act <- post_act %>%
+  dplyr::group_by(id) %>%
+  dplyr::mutate(meanAct = mean(value))%>%
+  dplyr::ungroup()# %>%
+  #dplyr::filter(age==1) # show results of only adults
+
+plot_activity <- ggplot()+
+  ggridges::geom_density_ridges(data = post_act,
+                                aes(x = value, y = reorder(as.factor(id), meanAct),
+                                    height = ..density..,
+                                    fill = sex, 
+                                    scale = 3), alpha = 0.6)+
+  geom_point(data = post_act[!duplicated(post_act$id),],
+             aes(x = meanAct, y = as.factor(id)),size = 1)+ # col = as.factor(sex)
+  labs(y = "", x = "proportion time spent moving" ) +#, fill = "id")+
+  theme_classic() +
+  scale_fill_manual(values =  c("#7CAE00","#FFCC00"))
+                     # c("#F8766D","#C77CFF","#7CAE00","#FFCC00","#00BFC4","gray"))
+plot_activity
+
+```
+
+
+## Distance moved
+Total distance the focal traveled in the novel environment (distance_moved): exploration
+
+### distribution
+
+```{r}
+ggplot(of_all, aes(x=distance_moved)) +
+  geom_histogram()
+
+ggplot(of_all, aes(x=sex,y=distance_moved)) +
+  geom_boxplot() +
+  geom_point()
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(of_all, "distance_moved")
+shapiro.test(of_all$distance_moved)
+
+
+m <- lm(distance_moved ~ sex, data = of_all)
+summary(m)
+d <- data.frame(residuals = residuals(m),         # Residuals
+                std_residuals = rstudent(m), # Studentized Residuals
+                fitted = fitted(m),          # Fitted values
+                cooks = cooks.distance(m))   # Cook's D
+d <- mutate(d, observation = 1:nrow(d))           # Observation number
+
+# histogram of residuals
+ggplot(data = d, aes(x = std_residuals)) +
+  geom_histogram(bins = 10)
+
+# Check for Normality: QQ Normality plot of residuals
+ggplot(data = d, aes(sample = std_residuals)) +
+  stat_qq() +
+  stat_qq_line()
+
+# Check heteroscedasticity or constant variance
+ggplot(d, aes(x = fitted, y = std_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+
+# Cook's D
+ggplot(d, aes(x = observation, y = cooks)) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 4/nrow(d), linetype = "dashed")
+# outliers
+d_outliers <- filter(d, cooks > 4/nrow(d))  # observation 86
+#d_outliers # no outliers when log-transformed; 2,31,33,34
+
+
+# distribution
+fitdistrplus::plotdist(of_all$distance_moved)
+fitdistrplus::descdist(of_all$distance_moved, discrete = F) # gamma or beta distribution
+
+plot(rgamma(100,shape = 2, scale = 2))
+
+# (gamlss)
+fit <- gamlss::fitDist(of_all$distance_moved, k = 2, type = "realline", 
+               trace = FALSE, try.gamlss = TRUE)
+summary(fit)
+fit$fits  # best fit: c("SEP2", "Skew Exponential Power type 2") 
+fit$failed
+
+
+```
+
+Transform distance moved 
+
+```{r sqrt transform}
+of_all$explore <- sqrt(of_all$distance_moved)
+
+ggplot(of_all, aes(x=explore)) +
+  geom_histogram()
+
+ggplot(of_all, aes(x=sex,y=explore ))+
+  geom_boxplot() +
+  geom_point()
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(of_all, "explore")
+shapiro.test(of_all$explore)
+
+
+m <- lm(explore ~ sex, data = of_all)
+summary(m)
+d <- data.frame(residuals = residuals(m),         # Residuals
+                std_residuals = rstudent(m), # Studentized Residuals
+                fitted = fitted(m),          # Fitted values
+                cooks = cooks.distance(m))   # Cook's D
+d <- mutate(d, observation = 1:nrow(d))           # Observation number
+
+# histogram of residuals
+ggplot(data = d, aes(x = std_residuals)) +
+  geom_histogram(bins = 10)
+
+# Check for Normality: QQ Normality plot of residuals
+ggplot(data = d, aes(sample = std_residuals)) +
+  stat_qq() +
+  stat_qq_line()
+
+# Check heteroscedasticity or constant variance
+ggplot(d, aes(x = fitted, y = std_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+
+# Cook's D
+ggplot(d, aes(x = observation, y = cooks)) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 4/nrow(d), linetype = "dashed")
+# outliers
+d_outliers <- filter(d, cooks > 4/nrow(d))  # observation 86
+#d_outliers # no outliers when log-transformed; 2,31,33,34
+
+
+# distribution
+fitdistrplus::plotdist(of_all$explore)
+fitdistrplus::descdist(of_all$explore, discrete = F) # close to normal distriubution
+
+
+
+
+
+```
+
+
+### bayesian model
+```{r exploration model}
+# get prior
+prior_explore <- get_prior(explore ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                   (1 | id) + (1 | group), #distance_moved  (not transformed)
+              data = of_all,
+              family = gaussian())
+
+m_explore <- brm(explore ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                   (1 | id) + (1 | group), #distance_moved  (not transformed)
+              data = of_all,
+              family = gaussian(), #Gamma(link = "log")
+              prior=prior_explore, 
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345)
+
+print(m_explore, prior=T)
+summary(m_explore, waic = TRUE)
+pp_check(m_explore) 
+plot(m_explore, ask=FALSE)
+plot(conditional_effects(m_explore),points=T)
+#brms::loo(m_explore) #, moment_match = TRUE
+loo.explore<- brms::loo(m_explore)$estimate[3]
+
+# include informed prior
+prior_explore_sex <- get_prior(explore ~ as.factor(sex)  + scale(video, scale=FALSE) +
+                   (1 | id) + (1 | group), #distance_moved  (not transformed)
+              data = of_all,
+              family = gaussian())
+
+m_explore_sex <- brm(explore ~ as.factor(sex)  + scale(video, scale=FALSE) +
+                   (1 | id) + (1 | group), #distance_moved  (not transformed)
+              data = of_all,
+              family = gaussian(), #Gamma(link = "log")
+              prior=prior_explore_sex, 
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345)
+
+print(m_explore_sex, prior=T)
+pp_check(m_explore_sex) 
+plot(m_explore_sex, ask=FALSE)
+loo.explore.sex<- brms::loo(m_explore_sex)$estimate[3]
+
+
+```
+#### plot
+
+```{r}
+
+
+explore_sex <- ggplot(of_all, aes(x=sex, y = explore)) +
+      geom_boxplot()+
+      labs(y = "square root-transformed distance moved (cm)", title="exploration" ) +#, fill = "id")+
+      theme_classic()
+explore_sex
+
+
+
+```
+
+```{r}
+
+
+explore_trial <- ggplot(of_all, aes(x=as.factor(video), y = explore)) +
+      geom_boxplot()+
+      labs(y = "square root-transformed distance moved (cm)", 
+           x = "trial number",
+           title="exploration" ) +#, fill = "id")+
+      theme_classic()
+explore_trial
+
+
+
+```
+
+### repeatability
+```{r explore repeatability}
+#colnames(posterior_samples(m_explore))
+colnames(as_draws_df(m_explore))
+
+# within individuals
+var.id <- as_draws_df(m_explore)$"sd_id__Intercept"^2
+round(mean(var.id),3);round(HPDinterval(as.mcmc(var.id),0.95),3)
+
+var.group <- as_draws_df(m_explore)$"sd_group__Intercept"^2
+round(mean(var.group),3);round(HPDinterval(as.mcmc(var.group),0.95),3)
+
+var.res <- as_draws_df(m_explore)$"sigma"^2
+round(mean(var.res),3);round(HPDinterval(as.mcmc(var.res),0.95),3)
+
+RDist.explore <- var.id / (var.id + var.group + var.res) # repeatability
+mean(RDist.explore);HPDinterval(as.mcmc(RDist.explore),0.95)
+#round(HPDI(RDist.explore, prob=0.95),2)
+
+#Coefficient of variation for between individual variance (CVi) 
+CVi <- sqrt(var.id) / mean(of_all$explore)
+mean(CVi);HPDinterval(as.mcmc(CVi),0.95)
+
+
+# within groups
+var.id <- as_draws_df(m_explore)$"sd_id__Intercept"^2
+var.group <- as_draws_df(m_explore)$"sd_group__Intercept"^2
+var.res <- as_draws_df(m_explore)$"sigma"^2
+RDist.group.explore <- var.group / (var.id + var.group + var.res) # repeatability
+mean(RDist.group.explore);HPDinterval(as.mcmc(RDist.group.explore),0.95)
+#round(HPDI(RDist.group.explore, prob=0.95),2)
+
+CVg <- sqrt(var.group) / mean(of_all$explore)
+mean(CVg);HPDinterval(as.mcmc(CVg),0.95)
+
+```
+After controlling for the fixed effects of sex and trial number, 5% 95CI[0.00-0.15] of the remaining variance can be explained by individual differences in activity within degus and 6% 95CI[0.00-0.16] within social groups. The coefficient of variation among individuals is 0.08 [0.02-0.13] and among groups is 0.03 [0.00-0.08]. 
+
+
+```{r}
+r2_bayes(m_explore)
+```
+
+
+Check with repeatable package
+```{r rpt explore}
+
+
+explore.rpt<-rpt(explore ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                (1|group) + (1|id), 
+              data=of_all, grname=c("group", "id", "Fixed", "Residual"),
+              datatype="Gaussian", link="logit", ratio=T, adjusted=F, nboot=1000, npermut = 1000)
+
+explore.rpt
+
+```
+ID with rpt package has repeatability of 0.036 with p=0.63 
+
+#### plot
+```{r}
+#levels(as.factor(of_all$age))
+
+n_distinct(m_explore$data$id)
+
+#posterior_explore <- as_draws_df(m_explore) 
+colnames(as_draws_df(m_explore))
+posterior_exp <- as_draws_df(m_explore)[,25:91] %>% # including pups: [,33:216]
+  gather(id, value, 
+       "r_id[101,Intercept]" : "r_id[193,Intercept]") %>% # including juveniles: "r_id[101,Intercept]" : "r_id[490,Intercept]") 
+  separate(id, 
+           c(NA,NA,"id",NA), 
+           sep = "([\\_\\[\\,])", fill = "right")
+
+# add sex and age
+of_all$id <- as.character(of_all$id)
+n_distinct(of_all$id)
+
+post_exp <- posterior_exp %>%
+  left_join(dplyr::select(of_all[!duplicated(of_all$id),], id, sex), by ="id") 
+
+post_exp[post_exp$sex == "1",]$value <-
+  post_exp[post_exp$sex == "1",]$value + fixef(m_explore, pars = "Intercept")[1]
+post_exp[post_exp$sex == "2",]$value <-
+  post_exp[post_exp$sex == "2",]$value + fixef(m_explore, pars = "Intercept")[1] + 
+  fixef(m_explore, pars = "sex")[1]
+
+#fixef(m_activity)
+
+# post_act$col <- ifelse(posteriorBT$animal_id %in% 
+#                             c("elephant17", "elephant4", "elephant8",
+#                               "elephant36","elephant20"),
+#                           posteriorBT$animal_id, "Other individuals")
+#post_act$col <- ifelse(posterior_act$id==1, "adult", "juvenile")
+  
+n_distinct(post_exp$id) 
+
+post_exp <- post_exp %>%
+  dplyr::group_by(id) %>%
+  dplyr::mutate(meanExp = mean(value))%>%
+  dplyr::ungroup()# %>%
+  #dplyr::filter(age==1) # show results of only adults
+
+plot_explore <- ggplot()+
+  ggridges::geom_density_ridges(data = post_exp,
+                                aes(x = value, y = reorder(as.factor(id), meanExp),
+                                    height = ..density..,
+                                    fill = sex, 
+                                    scale = 3), alpha = 0.6)+
+  geom_point(data = post_exp[!duplicated(post_exp$id),],
+             aes(x = meanExp, y = as.factor(id)),size = 1)+ # col = as.factor(sex)
+  labs(y = "", x = "total distance moved (cm)" ) +#, fill = "id")+
+  theme_classic() +
+  scale_fill_manual(values =  c("#7CAE00","#FFCC00"))
+                     # c("#F8766D","#C77CFF","#7CAE00","#FFCC00","#00BFC4","gray"))
+plot_explore
+
+```
+
+
+
+
+
+## Poke response
+
+###binomial 
+#### distribution
+Poke yes/no is a binomial distribution
+
+#### bayesian model
+Inspect a) the effective sample size and b) the Rhat parameter (should be 1) to make sure
+that our model converged. 
+
+“Eff.Sample” close to the expected sample size for all parameters. The expected sample size is the number of iterations minus the number of iterations which we discard as warm-up and divided by the thinning interval and multiplied by the number of chains defined in the model (2 chains in our case), i.e. ((3000 - 500) / 2) * 2 = 2500 
+
+
+
+We followed the suggestions of other studies. For example, Cornwell et al. (2020) transformed sex to a continuous variable (sex coded as 0 and 1) and mean-centred it as well. Especially, as we already have problems with model convergence, we wanted to make our models as simple as possible.  L183
+
+Cornwell, McCarthy, Biro. 2020. Integration of physiology, behaviour and life history traits: personality and pace of life in a marine gastropod, Animal Behaviour, 163:155-162,
+
+
+```{r poke model: sex as numeric}
+prior_poke <- get_prior(poke ~ scale(sex_num, scale=FALSE) + scale(trial, scale=FALSE) + 
+                    (1 | id) + (1 | groupID),
+              data = poke,
+              family = bernoulli())
+
+m_poke <- brm(poke ~ scale(sex_num, scale=FALSE) + scale(trial, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | groupID),
+              data = poke,
+              family = bernoulli(), # binomial(), Beta()
+              prior=prior_poke,
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345 #, adapt_delta=0.99
+              )
+m_poke <- add_criterion(m_poke, "loo")
+
+summary(m_poke, waic = TRUE)
+#head(predict(global)) # predict responses based on the fitted model
+
+# investigate model fit
+pp_check(m_poke) 
+plot(m_poke, ask=FALSE)
+plot(conditional_effects(m_poke),points=T, ask = F)
+
+brms::loo(m_poke) #, moment_match = TRUE
+loo.poke <- brms::loo(m_poke)$estimate[3]
+
+```
+
+
+```{r poke model: sex as factor}
+poke$sex <- as.factor(poke$sex)
+
+
+prior_poke1 <- get_prior(poke ~ sex + scale(trial, scale=FALSE) + 
+                    (1 | id) + (1 | groupID),
+              data = poke,
+              family = bernoulli())
+
+m_poke1 <- brm(poke ~ sex + scale(trial, scale=FALSE) + # center=T: mean-centering, scale=T: scaling on 1 SD
+                    (1 | id) + (1 | groupID),
+              data = poke,
+              family = bernoulli(), # binomial(), Beta()
+              prior=prior_poke1,
+              warmup = 500,
+              iter = 3000,
+              thin=2,
+              chains = 2,
+              init = "random",
+              cores = mycores,
+              seed = 12345 #, adapt_delta=0.99
+              )
+m_poke1 <- add_criterion(m_poke1, "loo")
+
+summary(m_poke1, waic = TRUE)
+#head(predict(global)) # predict responses based on the fitted model
+
+# investigate model fit
+pp_check(m_poke1) 
+plot(m_poke1, ask=FALSE)
+plot(conditional_effects(m_poke1),points=T, ask = F)
+
+brms::loo(m_poke1) #, moment_match = TRUE
+loo.poke1 <- brms::loo(m_poke1)$estimate[3]
+
+```
+
+#### comparison
+
+```{r}
+loo_compare(m_poke, m_poke1, criterion = "loo")
+```
+The poke response with sex as number is the better fititng model that also does not contain convergence warnings. 
+
+
+#### repeatability
+
+```{r}
+#colnames(posterior_samples(m_activity))
+colnames(as_draws_df(m_poke))
+
+# within individuals
+var.id <- as_draws_df(m_poke)$"sd_id__Intercept"^2
+round(mean(var.id),3);round(HPDinterval(as.mcmc(var.id),0.95),3)
+
+var.group <- as_draws_df(m_poke)$"sd_groupID__Intercept"^2
+round(mean(var.group),3);round(HPDinterval(as.mcmc(var.group),0.95),3)
+
+var.res <- pi^2/3 # residual variance for binomial distribution
+round(mean(var.res),3);round(HPDinterval(as.mcmc(var.res),0.95),3)
+
+RDist <- var.id / (var.id + var.group + var.res) # repeatability
+mean(RDist);HPDinterval(as.mcmc(RDist),0.95)
+#round(HPDI(RDist, prob=0.95),2)
+
+# within groups
+RDist.group <- var.group / (var.id + var.group + var.res) # repeatability
+mean(RDist.group);HPDinterval(as.mcmc(RDist.group),0.95)
+round(HPDI(RDist.group, prob=0.95),2)
+
+
+
+#Coefficient of variation for between individual variance (CVi) 
+CVi <- sqrt(var.id) / mean(of_all$poke)
+mean(CVi);HPDinterval(as.mcmc(CVi),0.95)
+
+CVg <- sqrt(var.group) / mean(of_all$poke) # between group variance
+mean(CVg);HPDinterval(as.mcmc(CVg),0.95)
+
+```
+After controlling for the fixed effects of sex and trial number, 41.6% 95CI[0.29-0.54] of the remaining variance can be explained by individual differences in willingness to attack within degus and 2% 95CI[0.00-0.09] within social groups. 
+
+```{r}
+r2_bayes(m_poke)
+```
+
+
+```{r poke repeatability}
+
+ggplot(pokedata, aes(x=poke)) +
+  geom_histogram()
+
+
+##Is poke repeatable for all degus? 
+
+poke.rpt<-rpt(poke ~ scale(sex_num, scale=FALSE) + scale(video, scale=FALSE) +
+                (1|groupID)+ (1|id), 
+              data=poke, grname=c("groupID", "id", "Fixed", "Residual"),
+              datatype="Binary", link="logit", ratio=T, adjusted=F, nboot=1000, npermut = 1000)
+
+poke.rpt
+
+
+
+```
+Poke is repeatable for individual degus (R = 0.34, p < 0.001) but not for groups (R = 0, p = 0.5). 
+
+
+
+# plot repeatability
+```{r}
+ggarrange(explore_sex, explore_trial, 
+          activity_trial,
+          ncol = 1,
+          labels="auto")
+
+ggsave("sex_trial_effect.pdf")
+```
+
+#Assortment
+
+Assortment by repeatable behavior poke response
+```{r}
+
+idspoke <- group %>% left_join(pokecont) # exlcude groups with missing poke data for group members if only 1 is left
+
+exclude_ids <- group %>% left_join(pokecont) 
+
+exclude_groups <- c(1, 4,  19) # 9, 7 -> missing poke data for some group members but not the majority
+
+individuals <- group %>%
+  left_join(pokecont) %>%
+  filter(poke_response!="NA",
+    !groupID %in% exclude_groups) %>%
+  dplyr::select(id, groupID, -sex) 
+
+gbi <- get_group_by_individual(individuals, data_format="individuals")
+
+network <- asnipe::get_network(gbi, data_format="GBI", association_index="HWI")
+
+View(network)
+
+#Data for Poke Test
+glimpse(pokecont)
+poke <- pokecont %>%
+  dplyr::select(id, poke_response)
+
+#Assortment Test
+#igraph::V(network)$poke <- pokecont$poke_response
+#igraph::assortativity(g, V(g)$size, directed=F) # for (un)directed networks but not weighted
+
+##by poke
+poke.r <- assortment.continuous(graph=network, 
+                                vertex_values=poke$poke_response,  #poke[,"poke_response"], 
+                                weighted=FALSE, SE=TRUE)
+str(poke.r)
+poke.r
+# r=0.03974087, se=0.06752463
+
+
+#Network Permutations - 
+
+test.np <- network_permutation(gbi, 
+                               data_format="GBI", 
+                               permutations=50000, 
+                               association_index="HWI", 
+                               association_matrix=network)
+
+
+poke.np <- vector(mode="numeric", length=50000)
+for (i in 1:50000) {  #length(dim(test.np)[1]))
+  poke.np[[i]] <- 
+    assortment.continuous(graph=test.np[i,,], vertex_values=poke$poke_response)$r
+}
+
+#p value
+p.poke.r <- length(poke.np[poke.np >= poke.r$r])/50000
+p.poke.r  
+p.poke.r*2
+# p= 0.99188  
+# p2= 1.98376
+
+
+# plot
+pdf("../results/hist_assortment_pokeXgroup.pdf") # open pdf file
+hist(poke.np); abline(v=poke.r$r, col="red")
+dev.off() # Close the pdf file
+
+```
+
+
+# fitness_Multivariate framework
+test for autocorrelation, robustness to different priors, and good model convergence using the geweke.diag and gelman.diag diagnostic functions 
+
+Only poke test is repeatable
+Poke test is binomial 
+    • either transform (proportion of amount of responses)
+    • or use binomial distribution  -> family = c(“gaussian”, “binomial”)
+
+reproductive success as litter size-> Poisson or transform and use relative fitness measure
+
+## distribution
+```{r distribution poke relative fitness}
+glimpse(littersize)
+
+ggplot(littersize, aes(x=sex, y=n_offspring)) +
+  geom_boxplot() +
+  geom_point()
+
+ggplot(littersize, aes(x=n_offspring)) +
+  geom_histogram()
+
+ggplot(littersize, aes(x=sex, y=rel_fitness)) +
+  geom_boxplot() +
+  geom_point()
+
+ggplot(littersize, aes(x=rel_fitness)) +
+  geom_histogram()
+
+#asin(sqrt(rel_fitness))
+logitTransform <- function(p) { log(p/(1-p)) }
+littersize <- littersize %>%
+  mutate(logitfitness=logitTransform(rel_fitness),
+         logfitness=log(rel_fitness),
+         arcfitness=asin(sqrt(rel_fitness)),
+         normfitness=faux::gamma2norm(rel_fitness))
+
+ggplot(littersize, aes(x=logfitness)) +
+  geom_histogram()
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(littersize, "logfitness")
+shapiro.test(littersize$logfitness) # relative fitness measure transformed using gamma2norm is closest to normal distribution
+
+
+ggplot(littersize, aes(x=sex, y=rel_fitness)) +
+  geom_boxplot() +
+  geom_point()
+
+# logfitness
+m <- lm(logfitness ~ sex, data = littersize)
+summary(m)
+d <- data.frame(residuals = residuals(m),         # Residuals
+                std_residuals = stats::rstudent(m), # Studentized Residuals
+                fitted = fitted(m),          # Fitted values
+                cooks = cooks.distance(m))   # Cook's D
+d <- mutate(d, observation = 1:nrow(d))           # Observation number
+
+# histogram of residuals
+ggplot(data = d, aes(x = std_residuals)) +
+  geom_histogram(bins = 10)
+
+# Check for Normality: QQ Normality plot of residuals
+ggplot(data = d, aes(sample = std_residuals)) +
+  stat_qq() +
+  stat_qq_line()
+
+# Check heteroscedasticity or constant variance
+ggplot(d, aes(x = fitted, y = std_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+
+# Cook's D
+ggplot(d, aes(x = observation, y = cooks)) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 4/nrow(d), linetype = "dashed")
+
+# outliers
+d_outliers <- filter(d, cooks > 4/nrow(d))  # observation 86
+#d_outliers # no outliers when log-transformed; 2,31,33,34
+
+
+# distribution
+fitdistrplus::plotdist(littersize$logfitness)
+fitdistrplus::descdist(littersize$logfitness, discrete = F) # beta distribution
+
+# (gamlss)
+fit <- gamlss::fitDist(littersize$logfitness, k = 2, type = "realline", 
+               trace = FALSE, try.gamlss = TRUE)
+summary(fit)
+fit$fits  # best fit: c("Logistic")
+fit$failed
+
+
+### normfitness
+shapiro.test(littersize$normfitness) 
+
+m <- lm(normfitness ~ sex, data = littersize)
+summary(m)
+d <- data.frame(residuals = residuals(m),         # Residuals
+                std_residuals = stats::rstudent(m), # Studentized Residuals
+                fitted = fitted(m),          # Fitted values
+                cooks = cooks.distance(m))   # Cook's D
+d <- mutate(d, observation = 1:nrow(d))           # Observation number
+
+# histogram of residuals
+ggplot(data = d, aes(x = std_residuals)) +
+  geom_histogram(bins = 10)
+
+# Check for Normality: QQ Normality plot of residuals
+ggplot(data = d, aes(sample = std_residuals)) +
+  stat_qq() +
+  stat_qq_line()
+
+# Check heteroscedasticity or constant variance
+ggplot(d, aes(x = fitted, y = std_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+
+# Cook's D
+ggplot(d, aes(x = observation, y = cooks)) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 4/nrow(d), linetype = "dashed")
+
+# outliers
+d_outliers <- filter(d, cooks > 4/nrow(d))  # observation 86
+#d_outliers # no outliers when log-transformed; 2,31,33,34
+
+
+# distribution
+fitdistrplus::plotdist(littersize$normfitness)
+fitdistrplus::descdist(littersize$normfitness, discrete = F) # beta distribution
+
+# (gamlss)
+fit <- gamlss::fitDist(littersize$normfitness, k = 2, type = "realline", 
+               trace = FALSE, try.gamlss = TRUE)
+summary(fit)
+fit$fits  # best fit: c("Logistic")
+fit$failed
+
+```
+relative fitness measure transformed using gamma2norm is closest to normal distribution
+
+
+##MCMCglmm
+MCMCglmm using code from Houslay and Wilson 2017 tutorial
+
+```{r}
+fitness <- littersize %>% dplyr::select(id, n_offspring, rel_fitness, normfitness)
+
+df <- poke %>% #pokecont (if continuous 1 mesure per id for pokke)
+  left_join(littersize, by=c("id", "sex")) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  mutate(sex_scale=scale(sex_num, scale = F), 
+         poke_scale=scale(poke, scale=F))
+
+
+```
+
+```{r distribution centred poke response}
+
+ggplot(df, aes(x=poke_scale)) +
+  geom_histogram()
+
+# shapiro test p >0.05, data normally distributed
+ggqqplot(df, "poke_scale")
+shapiro.test(df$poke_scale) 
+
+
+ggplot(df, aes(x=sex_scale, y=poke_scale)) +
+  geom_boxplot() +
+  geom_point()
+
+
+m <- lm(logfitness ~ sex, data = littersize)
+summary(m)
+d <- data.frame(residuals = residuals(m),         # Residuals
+                std_residuals = stats::rstudent(m), # Studentized Residuals
+                fitted = fitted(m),          # Fitted values
+                cooks = cooks.distance(m))   # Cook's D
+d <- mutate(d, observation = 1:nrow(d))           # Observation number
+
+# histogram of residuals
+ggplot(data = d, aes(x = std_residuals)) +
+  geom_histogram(bins = 10)
+
+# Check for Normality: QQ Normality plot of residuals
+ggplot(data = d, aes(sample = std_residuals)) +
+  stat_qq() +
+  stat_qq_line()
+
+# Check heteroscedasticity or constant variance
+ggplot(d, aes(x = fitted, y = std_residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+
+# Cook's D
+ggplot(d, aes(x = observation, y = cooks)) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 4/nrow(d), linetype = "dashed")
+
+# outliers
+d_outliers <- filter(d, cooks > 4/nrow(d))  # observation 86
+#d_outliers # no outliers when log-transformed; 2,31,33,34
+
+
+# distribution
+fitdistrplus::plotdist(littersize$logfitness)
+fitdistrplus::descdist(littersize$logfitness, discrete = F) # beta distribution
+
+# (gamlss)
+fit <- gamlss::fitDist(littersize$logfitness, k = 2, type = "realline", 
+               trace = FALSE, try.gamlss = TRUE)
+summary(fit)
+fit$fits  # best fit: c("Logistic")
+fit$failed
+
+
+```
+
+
+```{r set priors}
+#PRIOR- WITHIN-IND VARIATION
+#create a 'prior' for our model- this one is parametric-expanded inverse- Wishart priors
+#because we have multiple tactic values per individual the residuals (or within-individual variance) is NOT FIXED
+#G-list is random effects (among-individual)- we have 2
+#R-list is residual covariances (within-individual)
+#We have 2 cbind variables (
+
+
+Mprior<-list(R = list(V = diag(c(1,0.0001),2,2), nu = 1.002, fix = 2),
+             G = list(G1 = list(V = diag(2), nu = 2,alpha.mu = rep(0,2),
+                                         alpha.V = diag(25^2,2,2))))
+
+# prior_mcmc = list(R = list(V = diag(c(1,1,0.0001),3,3), nu = 1.002, fix = 3), 
+#                   G = list(G1 = list(V = diag(3), nu = 3, alpha.mu = rep(0,3), 
+#                                      alpha.V = diag(25^2,3,3))))
+```
+
+
+We updated the model, so that we mean-centred the poke response but not the relative fitness measure as that was already centred when we converted litter size to relative fitness.
+
+but still the model did not converge, so we left it as it was
+
+```{r MCMC model 1}
+
+
+# poke at binomial scale and multiple measures per id vs fitness only 1 measure
+job::job({
+M1_poke_fitness <- MCMCglmm(cbind(poke_scale, normfitness) ~ 
+                          trait-1 + # a distinct intercept for each trait
+                          at.level(trait,1):scale(trial, scale = FALSE) + # fixed effects are estimated only for certain traits (effect of trial only for poke)
+                          trait:sex_scale, #estimates for the effect of these variables on each of our behaviours
+                        random =~ us(trait):id, #fit an ‘unstructured’ (us) covariance matrix for the grouping variable ID. This means that we want to calculate the variance in exploration due to differences among individuals, the variance in boldness due to differences among individuals, and the covariance between these variances
+                        rcov =~ us(trait):units, # residual variance, ‘withinindividual variation’. As we have repeated measures for both traits at the individual level, we also set an unstructured covariance matrix, which finds the residual variance for each trait and also allows these variances to covary
+                        family = c("categorical","gaussian"), 
+                        prior = Mprior, 
+                        nitt=750000, burnin=50000, thin=175,
+                        verbose = TRUE,
+                       # pr = TRUE, # save posterior mode for each level of random effect, but takes long
+                     data = as.data.frame(df))
+})
+
+plot(M1_poke_fitness)
+
+summary(M1_poke_fitness)
+
+#model diagnostics
+# aim for the autocorrelation between successive stored iterations less than 0.05
+autocorr(M1_poke_fitness$Sol) # estimates level of nonindependence between successive samples
+autocorr(M1_poke_fitness$VCV)
+plot(M1_poke_fitness$Sol) # no trend in time series if model converged
+plot(log(M1_poke_fitness$VCV)) 
+
+# check model using simulation
+xsim <- simulate(M1_poke_fitness, 1000) # 1000 represents the number of simulations, and for some reason needs to be higher than the default to work in this case
+hist(apply(xsim, 2, max), breaks = 30) # plot your simulation data
+abline(v = max(M_poke_fitness$Slope), col = "red") # check to see whether the max value of your real data falls within this histogram.
+
+save(M1_poke_fitness, file="./results/M1_scaledpoke_fitness.robj")
+
+load("./results/M1_scaledpoke_fitness.robj")
+
+
+# save trace plot
+png("./results/traceplot_MCMCglmm_scaled.png")
+plot(M1_poke_fitness$Sol)
+dev.off()
+
+```
+```{r MCMC model 2: gamma distribution for relative fitness}
+
+
+# poke at binomial scale and multiple measures per id vs fitness only 1 measure
+job::job({
+M2_poke_fitness <- MCMCglmm(cbind(poke_scale, rel_fitness) ~ 
+                          trait-1 + # a distinct intercept for each trait
+                          at.level(trait,1):scale(trial, scale = FALSE) + # fixed effects are estimated only for certain traits (effect of trial only for poke)
+                          trait:sex_scale, #estimates for the effect of these variables on each of our behaviours
+                        random =~ us(trait):id, #fit an ‘unstructured’ (us) covariance matrix for the grouping variable ID. This means that we want to calculate the variance in exploration due to differences among individuals, the variance in boldness due to differences among individuals, and the covariance between these variances
+                        rcov =~ us(trait):units, # residual variance, ‘withinindividual variation’. As we have repeated measures for both traits at the individual level, we also set an unstructured covariance matrix, which finds the residual variance for each trait and also allows these variances to covary
+                        family = c("categorical","gamma"), 
+                        prior = Mprior, 
+                        nitt=750000, burnin=50000, thin=175,
+                        verbose = TRUE,
+                       # pr = TRUE, # save posterior mode for each level of random effect, but takes long
+                     data = as.data.frame(df))
+})
+
+plot(M2_poke_fitness)
+
+summary(M2_poke_fitness)
+
+#model diagnostics
+# aim for the autocorrelation between successive stored iterations less than 0.05
+autocorr(M1_poke_fitness$Sol) # estimates level of nonindependence between successive samples
+autocorr(M1_poke_fitness$VCV)
+plot(M1_poke_fitness$Sol) # no trend in time series if model converged
+plot(log(M1_poke_fitness$VCV)) 
+
+# check model using simulation
+xsim <- simulate(M1_poke_fitness, 1000) # 1000 represents the number of simulations, and for some reason needs to be higher than the default to work in this case
+hist(apply(xsim, 2, max), breaks = 30) # plot your simulation data
+abline(v = max(M_poke_fitness$Slope), col = "red") # check to see whether the max value of your real data falls within this histogram.
+
+save(M1_poke_fitness, file="./results/M1_scaledpoke_fitness.robj")
+
+load("./results/M1_scaledpoke_fitness.robj")
+
+
+# save trace plot
+png("./results/traceplot_MCMCglmm_scaled.png")
+plot(M1_poke_fitness$Sol)
+dev.off()
+
+```
+
+### among-individual correlations 
+use our posterior distributions to estimate the among-individual correlations between our two variables
+assess statistical significance using their 95% credible intervals from our MCMCglmm model
+
+```{r}
+colnames(M1_poke_fitness$VCV)
+
+#poke and reproductive success
+cor_poke_fitness <- M1_poke_fitness$VCV[,"traitpoke_scale.0.627646326276463:traitnormfitness.id"]/
+  (sqrt(M1_poke_fitness$VCV[,"traitpoke_scale.0.627646326276463:traitnormfitness.id"])*
+     sqrt(M1_poke_fitness$VCV[,"traitnormfitness:traitnormfitness.id"]))
+
+cor_poke_fitness <- M1_poke_fitness$VCV[,"traitpoke.1:traitnormfitness.id"]/
+  (sqrt(M1_poke_fitness$VCV[,"traitpoke.1:traitnormfitness.id"])*
+     sqrt(M1_poke_fitness$VCV[,"traitnormfitness:traitnormfitness.id"]))
+
+#create dataframe
+df_cors <- data_frame(Traits = c("poke response, fitness"),
+                      Estimate = c(mean(cor_poke_fitness, na.rm=T)),
+                      Lower = c(HPDinterval(cor_poke_fitness)[,"lower"]),
+                      Upper = c(HPDinterval(cor_poke_fitness)[,"upper"]))
+
+write.csv(df_cors, "./results/table_corM1_scaledpoke_fitness.csv")
+
+#correlations that cross zero are INSIGNIFICANT
+ggplot(df_cors, aes(x = Traits, y = Estimate)) +
+  geom_pointrange(aes(ymin = Lower,
+                      ymax = Upper)) +
+  geom_hline(yintercept = 0,
+             linetype = "dotted", size = 1, alpha = 0.5) +
+  scale_x_discrete(limits = c("poke response, fitness"))+
+  labs(x = "Trait combination",
+       y = "Correlation (Estimate +/- 95% CIs)") +
+  ylim(-1,1) +
+  coord_flip() +
+  theme_classic(base_size = 15)
+ggsave("./results/posterior_poke vs fitness.png", width = 16 , height = 10, units = "cm")
+```
+
+
+
+
+
+
+
+# fitness_nonparametric: Speearman correlation
+
+We are using a continuous measure of the poke test due to problems with multivariate framework model convergence. 
+
+
+```{r}
+# create continuous measure for poke data that may help model convergence of multivariate framework (proportion of 1 means, degus responded in all poke trials, proportion of 0.5 means that degus responded in half and did not respond in the other half of the trials, and a proportion of 0 means that degus did not respond in any of the trials)
+
+
+pokecont <- poke %>%
+  mutate(poke_response=if_else(poke==0, "no_response", "response")) %>%
+  group_by(id, poke_response) %>%
+  tally() %>%
+  pivot_wider(names_from = poke_response,
+              values_from = n) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  mutate(total = no_response + response,
+         poke_response=response/total) %>%
+  left_join(group)
+
+
+df <- pokecont %>% # (if continuous 1 mesure per id for pokke)
+  left_join(littersize, by=c("id", "sex")) %>%
+  mutate_all(~replace(., is.na(.), 0)) 
+
+
+```
+
+
+```{r}
+cor.test(df$poke_response, df$rel_fitness, method = c("spearman"))
+```
+
+
+
+
+## plot
+
+```{r}
+ggplot(pokecont, aes(y=id, x=poke_response)) +
+  geom_point() +
+  theme_classic() +
+  labs(x="proportion of times degus responded to being poked")
+
+meanpoke <- mean(pokecont$poke_response)
+plotpoke <- ggplot(pokecont, aes(x = poke_response, y = id , #reorder(as.factor(id), meanpoke)
+                                    color = sex), alpha = 0.6)+
+  geom_point()+ # col = as.factor(sex)
+  #dplyr::scale_x_continuous(limits=c(1-10)) +
+  labs(y = "ID", x = "proportion of times degus responded to being poked" ) +#, fill = "id")+
+  theme_classic() +
+  scale_color_manual(values =  c("#7CAE00","#FFCC00"))
+plotpoke
+
+
+#visualize relationship 
+ggscatter(df_1measure, x = "poke_response", y = "n_offspring", 
+          #add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = "poke response", ylab = "number of offspring")
+
+ggplot(df, aes(x=poke_response, y=rel_fitness)) +
+  geom_point() +
+  theme_classic() +
+  labs(x="proportion of response to being poked", y="relative fitness")
+
+ggplot(df, aes(x=poke_response, y=n_offspring, color=sex)) +
+  geom_point() +
+  theme_classic() +
+  labs(x="proportion of response to being poked", y="number of offspring") +
+  scale_color_manual(values =  c("#7CAE00","#FFCC00"))
+
+ggsave("./results/plot_poke vs fitness.pdf", width = 16 , height = 10, units = "cm") #.png -> , res = 300, 8.3 cm is one-column width
+```
+
+
+
+
