@@ -10,7 +10,7 @@ DOI: 10.5281/zenodo.8156905
 License: CC0
 
 METADATA
-We included the code in the Rmarkdown file titled "Rmd_degu_personality_v1.3.Rmd"
+We included the code in the Rmarkdown file titled "Rmd_degu_personality_v2.0_R2.Rmd"
 
 The data files can be found in the data folder. 
 
