@@ -5,7 +5,10 @@ the composition of social groups, and ii) the reproductive success of individual
 We identified several social groups in a population in central-north Chile, tested adults in an open field and poke test to quantify individual behavioral variation, 
 determined assortment based on individual behavioral differences across social groups, and performed genetic analyses.
 
-CITATION
+CITATION MANUSCRIPT
+van der Marel, A., Johnson, N., Grillo, S., Riquelme, J., Vásquez, R., Gillam, E., Ebensperger, L., & Hayes, L. (2024). Individual behavioural variation does not affect social organization or reproductive success in a cooperative small mammal. Behaviour, 161(5), 369-397. https://doi.org/10.1163/1568539X-bja10264
+
+CITATION CODE
 DOI: 10.5281/zenodo.8156905 
 License: CC0
 
